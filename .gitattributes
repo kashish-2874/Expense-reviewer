@@ -1,0 +1,4 @@
+# Keep LF line endings in the repo and on checkout, so Docker/Linux builds
+# behave the same as on Windows.
+* text=auto eol=lf
+*.png binary

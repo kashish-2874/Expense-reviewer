@@ -1,0 +1,39 @@
+{
+  "name": "expense-review-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API for the expense claim policy review assistant",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "start": "node dist/server.js",
+    "seed": "tsx src/seed.ts",
+    "seed:prod": "node dist/seed.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.5",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.132.1",
+    "better-sqlite3": "10.1.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1",
+    "pino": "^10.4.0",
+    "pino-http": "^11.0.0",
+    "zod": "^3.25.76"
+  }
+}

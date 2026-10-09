@@ -1,0 +1,17 @@
+{
+  "baseCurrency": "INR",
+  "exchangeRates": { "INR": 1, "USD": 83, "EUR": 90, "GBP": 105 },
+  "receiptRequiredAbove": 500,
+  "dateRules": { "maxAgeDays": 90, "allowFuture": false },
+  "confidenceThreshold": 0.7,
+  "duplicate": { "descriptionSimilarityThreshold": 0.8 },
+  "categories": {
+    "meals":                { "label": "Meals", "perClaimLimit": 1500, "policySection": "2" },
+    "travel_transport":     { "label": "Travel and Transport", "perClaimLimit": 3000, "policySection": "3" },
+    "lodging":              { "label": "Lodging", "perClaimLimit": 8000, "policySection": "4" },
+    "software":             { "label": "Software and Subscriptions", "perClaimLimit": 5000, "policySection": "5" },
+    "client_entertainment": { "label": "Client Entertainment", "perClaimLimit": 6000, "policySection": "6" },
+    "office_supplies":      { "label": "Office Supplies", "perClaimLimit": 2500, "policySection": "7" },
+    "training":             { "label": "Training and Conferences", "perClaimLimit": 25000, "policySection": "8" }
+  }
+}
