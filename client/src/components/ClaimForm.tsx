@@ -1,12 +1,13 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { api, ApiError } from "../api";
-import { navigate } from "../hooks";
-import type { AppConfig, ClaimInput } from "../types";
+import type { AppConfig, ClaimInput, ClaimReceipt } from "../types";
 import { Card } from "./ui";
 
-// New-claim form. It blocks only what the server would refuse (missing or
-// malformed fields). Policy issues like a future date or a missing receipt are
-// allowed through, because the server flags them for the reviewer.
+// PUBLIC new-claim form (no login). It blocks only what the server would
+// refuse (missing or malformed fields). Policy issues like a future date or a
+// missing receipt are allowed through, because the server flags them for the
+// reviewer. After submitting, the claimant only sees a confirmation with the
+// claim number: validation flags and AI output are for reviewers.
 
 interface FormState {
   claimant: string;
@@ -36,7 +37,7 @@ function validateForm(f: FormState): Errors {
 }
 
 export function ClaimForm({ config }: { config: AppConfig }) {
-  const [form, setForm] = useState<FormState>({
+  const emptyForm: FormState = {
     claimant: "",
     date: "",
     category: "",
@@ -44,10 +45,12 @@ export function ClaimForm({ config }: { config: AppConfig }) {
     currency: config.baseCurrency,
     description: "",
     receiptAvailable: "",
-  });
+  };
+  const [form, setForm] = useState<FormState>(emptyForm);
   const [errors, setErrors] = useState<Errors>({});
   const [submitError, setSubmitError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+  const [receipt, setReceipt] = useState<ClaimReceipt>();
 
   const set = (field: keyof FormState) => (e: { target: { value: string } }) => {
     setForm((f) => ({ ...f, [field]: e.target.value }));
@@ -72,14 +75,29 @@ export function ClaimForm({ config }: { config: AppConfig }) {
     setSubmitting(true);
     setSubmitError(undefined);
     try {
-      const created = await api.createClaim(claim);
-      navigate(`#/claims/${created.id}`);
+      setReceipt(await api.createClaim(claim));
+      setForm(emptyForm);
     } catch (err) {
       // Map server field errors back onto the form when possible.
       if (err instanceof ApiError) setErrors(err.fieldErrors() as Errors);
       setSubmitError(err instanceof Error ? err.message : "Could not submit the claim");
+    } finally {
       setSubmitting(false);
     }
+  }
+
+  if (receipt) {
+    return (
+      <Card title="Claim submitted">
+        <div className="confirmation" role="status">
+          <p className="confirmation-number">Claim #{receipt.claimNumber}</p>
+          <p>Thank you. Your claim has been received and a reviewer will look at it. Keep the claim number for reference.</p>
+          <button type="button" className="btn btn-primary" onClick={() => setReceipt(undefined)}>
+            Submit another claim
+          </button>
+        </div>
+      </Card>
+    );
   }
 
   const limit = config.categories.find((c) => c.key === form.category)?.perClaimLimit;
@@ -87,15 +105,19 @@ export function ClaimForm({ config }: { config: AppConfig }) {
   return (
     <Card title="Submit a claim">
       <form className="form" onSubmit={submit} noValidate>
-        <Field label="Claimant" error={errors.claimant}>
-          <input value={form.claimant} onChange={set("claimant")} maxLength={100} autoFocus />
+        <Field label="Claimant" error={errors.claimant} hint="Name of the employee who spent the money">
+          <input value={form.claimant} onChange={set("claimant")} maxLength={100} placeholder="e.g. Asha Rao" autoFocus />
         </Field>
 
         <div className="form-row">
-          <Field label="Expense date" error={errors.date}>
+          <Field label="Expense date" error={errors.date} hint="The day the money was spent, not today's date">
             <input type="date" value={form.date} onChange={set("date")} />
           </Field>
-          <Field label="Category" error={errors.category} hint={limit ? `Limit ${config.baseCurrency} ${limit} per claim` : undefined}>
+          <Field
+            label="Category"
+            error={errors.category}
+            hint={limit ? `Limit ${config.baseCurrency} ${limit} per claim` : "Pick the closest match; the reviewer can change it"}
+          >
             <select value={form.category} onChange={set("category")}>
               <option value="">Choose…</option>
               {config.categories.map((c) => (
@@ -108,8 +130,8 @@ export function ClaimForm({ config }: { config: AppConfig }) {
         </div>
 
         <div className="form-row">
-          <Field label="Amount" error={errors.amount}>
-            <input type="number" inputMode="decimal" min="0" step="0.01" value={form.amount} onChange={set("amount")} />
+          <Field label="Amount" error={errors.amount} hint="As shown on the receipt, in the currency paid">
+            <input type="number" inputMode="decimal" min="0" step="0.01" value={form.amount} onChange={set("amount")} placeholder="e.g. 1250" />
           </Field>
           <Field label="Currency" error={errors.currency}>
             <select value={form.currency} onChange={set("currency")}>
@@ -120,8 +142,18 @@ export function ClaimForm({ config }: { config: AppConfig }) {
           </Field>
         </div>
 
-        <Field label="Description and business purpose" error={errors.description}>
-          <textarea rows={3} value={form.description} onChange={set("description")} maxLength={1000} />
+        <Field
+          label="Description and business purpose"
+          error={errors.description}
+          hint="What was it for? Include client name or trip details."
+        >
+          <textarea
+            rows={3}
+            value={form.description}
+            onChange={set("description")}
+            maxLength={1000}
+            placeholder="e.g. Taxi from Bengaluru airport to the Acme Retail office for the contract review"
+          />
         </Field>
 
         <Field
@@ -150,9 +182,6 @@ export function ClaimForm({ config }: { config: AppConfig }) {
           <button type="submit" className="btn btn-primary" disabled={submitting}>
             {submitting ? "Submitting…" : "Submit claim"}
           </button>
-          <a href="#/" className="btn btn-link">
-            Cancel
-          </a>
         </div>
       </form>
     </Card>

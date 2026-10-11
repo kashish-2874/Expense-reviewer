@@ -1,16 +1,16 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import pino from "pino";
 import request from "supertest";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AiClient } from "../src/ai/client";
-import { loadPolicy } from "../src/ai/policy";
-import { createApp } from "../src/app";
-import { config } from "../src/config/config";
-import { openDb, type DB } from "../src/db/db";
+import { setupDatabase } from "../src/db/setup";
+import { buildApp, createAdmin, loggedInAgent } from "./helpers/testApp";
+import { useTestDatabase } from "./helpers/testDatabase";
 
-const TODAY = "2026-10-09";
+// Reviewer-area API tests. Claims are submitted through the PUBLIC endpoint
+// (plain `request`); everything else uses `agent`, which is logged in as the
+// test admin "Kashish". Auth-specific tests live in auth.test.ts.
 
 // Fake AI that returns whatever the current test queued (or fails).
 class FakeAi implements AiClient {
@@ -45,27 +45,31 @@ const validClaim = {
   receiptAvailable: true,
 };
 
-let db: DB;
+const t = useTestDatabase(); // fresh MongoDB database per test
 let ai: FakeAi;
-let app: ReturnType<typeof createApp>;
+let app: ReturnType<typeof buildApp>;
+let agent: Awaited<ReturnType<typeof loggedInAgent>>;
 
-beforeEach(() => {
-  db = openDb(":memory:");
+beforeEach(async () => {
   ai = new FakeAi();
-  app = createApp(
-    { db, config, policy: loadPolicy(), aiClient: ai, aiTimeoutMs: 500, today: () => TODAY },
-    pino({ level: "silent" }),
-  );
+  app = buildApp(t.store, ai);
+  await createAdmin(t.store);
+  agent = await loggedInAgent(app);
 });
 
+// Submits publicly, then reads the full claim back as the reviewer.
 async function createClaim(overrides: Record<string, unknown> = {}) {
   const res = await request(app).post("/api/claims").send({ ...validClaim, ...overrides });
   expect(res.status).toBe(201);
-  return res.body as { id: number; validationResults: { checkName: string; severity: string; details: Record<string, unknown> }[] };
+  const detail = await agent.get(`/api/claims/${res.body.claimNumber}`);
+  return detail.body as {
+    id: number;
+    status: string;
+    validationResults: { checkName: string; severity: string; details: Record<string, unknown> }[];
+  };
 }
 
-const decide = (id: number, body: Record<string, unknown>) =>
-  request(app).post(`/api/claims/${id}/decision`).send({ reviewer: "Kashish", ...body });
+const decide = (id: number, body: Record<string, unknown>) => agent.post(`/api/claims/${id}/decision`).send(body);
 
 describe("claims API", () => {
   it("creates a claim, runs validators and stores the results", async () => {
@@ -112,28 +116,28 @@ describe("claims API", () => {
     const a = await createClaim({ amount: 2000, receiptAvailable: false });
     await createClaim({ claimant: "Vikram", description: "Printer paper", category: "office_supplies", amount: 300 });
     ai.queue.push(aiOutput());
-    await request(app).post(`/api/claims/${a.id}/review`).send({});
+    await agent.post(`/api/claims/${a.id}/review`).send({});
 
-    const all = await request(app).get("/api/claims");
-    expect(all.body).toHaveLength(2);
-    const listed = all.body.find((c: { id: number }) => c.id === a.id);
+    const all = await agent.get("/api/claims");
+    expect(all.body).toMatchObject({ page: 1, limit: 10, total: 2, totalPages: 1 });
+    const listed = all.body.items.find((c: { id: number }) => c.id === a.id);
     expect(listed).toMatchObject({
       status: "under_review",
       validationCounts: { error: 0, warning: 2, info: 0 },
       latestAi: { status: "ok", uncertain: true, verdict: "needs_clarification" },
     });
 
-    const filtered = await request(app).get("/api/claims?status=submitted");
-    expect(filtered.body.map((c: { claimant: string }) => c.claimant)).toEqual(["Vikram"]);
+    const filtered = await agent.get("/api/claims?status=submitted");
+    expect(filtered.body.items.map((c: { claimant: string }) => c.claimant)).toEqual(["Vikram"]);
 
-    const bad = await request(app).get("/api/claims?status=paid");
+    const bad = await agent.get("/api/claims?status=paid");
     expect(bad.status).toBe(400);
   });
 
   it("returns 404 for an unknown claim and 400 for a bad id", async () => {
-    expect((await request(app).get("/api/claims/999")).status).toBe(404);
-    expect((await request(app).get("/api/claims/abc")).status).toBe(400);
-    expect((await request(app).get("/api/nope")).body.error).toMatch(/Route not found/);
+    expect((await agent.get("/api/claims/999")).status).toBe(404);
+    expect((await agent.get("/api/claims/abc")).status).toBe(400);
+    expect((await agent.get("/api/nope")).body.error).toMatch(/Route not found/);
   });
 });
 
@@ -142,20 +146,20 @@ describe("AI review API", () => {
     const { id } = await createClaim();
     ai.queue.push(aiOutput(), aiOutput({ confidence: 0.9, category: "meals" }));
 
-    const first = await request(app).post(`/api/claims/${id}/review`).send({ reviewer: "Kashish" });
+    const first = await agent.post(`/api/claims/${id}/review`).send({ reviewer: "Kashish" });
     expect(first.status).toBe(201);
     expect(first.body).toMatchObject({ status: "ok", uncertain: true, promptVersion: "v1", model: "fake-model" });
     expect(first.body.citedSections[0]).toMatchObject({ section: "6.2", verified: true });
 
-    await request(app).post(`/api/claims/${id}/review`).send({});
-    const detail = await request(app).get(`/api/claims/${id}`);
+    await agent.post(`/api/claims/${id}/review`).send({});
+    const detail = await agent.get(`/api/claims/${id}`);
     expect(detail.body.status).toBe("under_review");
     expect(detail.body.aiReviews.map((r: { category: string }) => r.category)).toEqual(["meals", "client_entertainment"]);
   });
 
   it("stores an 'unavailable' review instead of failing when the AI is down", async () => {
     const { id } = await createClaim();
-    const res = await request(app).post(`/api/claims/${id}/review`).send({});
+    const res = await agent.post(`/api/claims/${id}/review`).send({});
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ status: "unavailable", explanation: "AI unavailable, manual review needed", error: "AI down" });
 
@@ -174,7 +178,7 @@ describe("decisions API", () => {
     const again = await decide(id, { action: "reject", reason: "changed my mind" });
     expect(again.status).toBe(409);
     expect(again.body.error).toMatch(/already approved/);
-    expect((await request(app).post(`/api/claims/${id}/review`).send({})).status).toBe(409);
+    expect((await agent.post(`/api/claims/${id}/review`).send({})).status).toBe(409);
   });
 
   it.each(["reject", "request_clarification"])("requires a reason to %s", async (action) => {
@@ -182,20 +186,19 @@ describe("decisions API", () => {
     const res = await decide(id, { action, reason: "   " });
     expect(res.status).toBe(400);
     expect(res.body.details).toEqual([expect.objectContaining({ path: "reason" })]);
-    expect((await request(app).get(`/api/claims/${id}`)).body.status).toBe("submitted");
+    expect((await agent.get(`/api/claims/${id}`)).body.status).toBe("submitted");
   });
 
-  it("also enforces the reason rule in the database itself", () => {
-    db.prepare("INSERT INTO claims (claimant, date, category, amount, currency, description, receipt_available) VALUES ('a','2026-10-01','meals',1,'INR','d',1)").run();
-    expect(() =>
-      db.prepare("INSERT INTO decisions (claim_id, reviewer, action) VALUES (1, 'x', 'reject')").run(),
-    ).toThrow(/CHECK constraint/);
-  });
-
-  it("requires a reviewer name", async () => {
-    const { id } = await createClaim();
-    const res = await request(app).post(`/api/claims/${id}/decision`).send({ action: "approve", reviewer: " " });
-    expect(res.status).toBe(400);
+  it("also enforces the reason rule in the database itself", async () => {
+    // Bypasses the API on purpose: the collection validator must still refuse it.
+    const decisions = t.store.db.collection("decisions");
+    const base = { claimNumber: 1, reviewer: "x", createdAt: new Date() };
+    await expect(decisions.insertOne({ ...base, action: "reject" })).rejects.toThrow(/Document failed validation/);
+    await expect(decisions.insertOne({ ...base, action: "reject", reason: "   " })).rejects.toThrow(/Document failed validation/);
+    await expect(decisions.insertOne({ ...base, action: "override_category", reason: "ok" })).rejects.toThrow(
+      /Document failed validation/,
+    );
+    await expect(decisions.insertOne({ ...base, action: "approve" })).resolves.toBeTruthy();
   });
 
   it("requires a reason to approve over a validation error", async () => {
@@ -210,7 +213,7 @@ describe("decisions API", () => {
   it("overrides the category with a reason, keeping the AI output untouched", async () => {
     const { id } = await createClaim({ amount: 5000 }); // over the meals limit (1500)
     ai.queue.push(aiOutput());
-    const aiRes = await request(app).post(`/api/claims/${id}/review`).send({});
+    const aiRes = await agent.post(`/api/claims/${id}/review`).send({});
 
     expect((await decide(id, { action: "override_category", overrideCategory: "client_entertainment" })).status).toBe(400);
     expect((await decide(id, { action: "override_category", overrideCategory: "gym", reason: "x" })).status).toBe(400);
@@ -219,7 +222,7 @@ describe("decisions API", () => {
     expect(res.status).toBe(201);
     expect(res.body.claim).toMatchObject({ category: "meals", finalCategory: "client_entertainment", status: "under_review" });
 
-    const detail = (await request(app).get(`/api/claims/${id}`)).body;
+    const detail = (await agent.get(`/api/claims/${id}`)).body;
     expect(detail.aiReviews[0]).toEqual(aiRes.body); // AI output unchanged
     expect(detail.validationResults.at(-1)).toMatchObject({
       checkName: "category_limit",
@@ -246,12 +249,12 @@ describe("history", () => {
   it("shows every step of the full flow, newest first", async () => {
     const { id } = await createClaim();
     ai.queue.push(aiOutput());
-    await request(app).post(`/api/claims/${id}/review`).send({ reviewer: "Kashish" });
+    await agent.post(`/api/claims/${id}/review`).send({ reviewer: "Kashish" });
     await decide(id, { action: "request_clarification", reason: "Was Rahul a client?" });
     await decide(id, { action: "override_category", overrideCategory: "client_entertainment", reason: "Confirmed client" });
     await decide(id, { action: "approve" });
 
-    const detail = (await request(app).get(`/api/claims/${id}`)).body;
+    const detail = (await agent.get(`/api/claims/${id}`)).body;
     expect(detail.status).toBe("approved");
     expect(detail.auditEvents.map((e: { action: string; actor: string }) => `${e.action}/${e.actor}`)).toEqual([
       "decision_approve/Kashish",
@@ -268,14 +271,18 @@ describe("history", () => {
     expect(detail.auditEvents[3].after).toMatchObject({ aiStatus: "ok", status: "under_review" });
   });
 
-  it("rolls back the change when the audit write fails, and vice versa", async () => {
+  it("rolls back the decision when the audit write fails", async () => {
     const { id } = await createClaim();
-    db.exec("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'audit down'); END;");
+    // Make every audit insert fail: a validator that no document can pass.
+    await t.store.db.command({ collMod: "audit_events", validator: { $expr: { $eq: [1, 0] } } });
     const res = await decide(id, { action: "approve" });
     expect(res.status).toBe(500);
     expect(res.body.details.requestId).toBeTruthy();
-    db.exec("DROP TRIGGER fail_audit");
-    expect((await request(app).get(`/api/claims/${id}`)).body.status).toBe("submitted");
+    await setupDatabase(t.store.db); // restore the real validator
+
+    const detail = (await agent.get(`/api/claims/${id}`)).body;
+    expect(detail.status).toBe("submitted"); // status change was rolled back
+    expect(detail.decisions).toEqual([]); // and so was the decision record
   });
 });
 
@@ -287,7 +294,7 @@ describe("totals and health", () => {
     await decide(a.id, { action: "override_category", overrideCategory: "client_entertainment", reason: "client" });
     await decide(b.id, { action: "reject", reason: "personal" });
 
-    const res = await request(app).get("/api/totals");
+    const res = await agent.get("/api/totals");
     expect(res.body).toMatchObject({
       baseCurrency: "INR",
       byClaimant: { "Asha Rao": 830, Vikram: 999 },
@@ -300,11 +307,7 @@ describe("totals and health", () => {
   it("serves the built client when configured, but keeps JSON 404s for /api", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "client-"));
     writeFileSync(path.join(dir, "index.html"), "<html>app</html>");
-    const withClient = createApp(
-      { db, config, policy: loadPolicy(), aiClient: ai, aiTimeoutMs: 500, today: () => TODAY },
-      pino({ level: "silent" }),
-      { clientDir: dir },
-    );
+    const withClient = buildApp(t.store, ai, { clientDir: dir });
     expect((await request(withClient).get("/")).text).toBe("<html>app</html>");
     expect((await request(withClient).get("/some/page")).text).toBe("<html>app</html>");
     const api404 = await request(withClient).get("/api/nope");
@@ -312,13 +315,13 @@ describe("totals and health", () => {
     expect(api404.body.error).toMatch(/Route not found/);
   });
 
-  it("exposes the form options from config", async () => {
+  it("exposes the form options from config without a login", async () => {
     const res = await request(app).get("/api/config");
     expect(res.body.currencies).toEqual(["INR", "USD", "EUR", "GBP"]);
     expect(res.body.categories[0]).toEqual({ key: "meals", label: "Meals", perClaimLimit: 1500 });
   });
 
-  it("reports health and echoes a request id", async () => {
+  it("reports health without a login and echoes a request id", async () => {
     const res = await request(app).get("/api/health").set("x-request-id", "test-123");
     expect(res.body).toEqual({ status: "ok", db: "ok", ai: { mode: "mock", model: "fake-model" } });
     expect(res.headers["x-request-id"]).toBe("test-123");

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import cookieParser from "cookie-parser";
 import express from "express";
 import { pinoHttp } from "pino-http";
 import { errorHandler, notFound } from "./errors";
 import type { Logger } from "./logger";
+import { authRouter } from "./routes/auth";
 import { claimsRouter } from "./routes/claims";
 import { decisionsRouter } from "./routes/decisions";
 import { metaRouter } from "./routes/meta";
@@ -41,7 +43,11 @@ export function createApp(deps: AppDeps, logger: Logger, options: { clientDir?: 
     }),
   );
   app.use(express.json({ limit: "100kb" }));
+  app.use(cookieParser()); // fills req.cookies, where requireAuth finds the session token
 
+  // Which routes are public and which need a login is decided in each router,
+  // next to the route itself (see reviewerOnly).
+  app.use("/api/auth", authRouter(deps));
   app.use("/api", metaRouter(deps));
   app.use("/api/claims", claimsRouter(deps));
   app.use("/api/claims", reviewRouter(deps));
@@ -51,7 +57,8 @@ export function createApp(deps: AppDeps, logger: Logger, options: { clientDir?: 
   if (options.clientDir) {
     const clientDir = options.clientDir;
     app.use(express.static(clientDir));
-    // The client uses hash routes, so every other path can just get index.html.
+    // The client routes in the browser (/login, /claims/9, ...), so every
+    // non-API path gets index.html and the React app picks the page.
     app.get("/{*path}", (_req, res) => res.sendFile(path.join(clientDir, "index.html")));
   }
 

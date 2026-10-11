@@ -1,8 +1,8 @@
-// tsc only emits .ts (and imported .json) files. The schema and policy are read
+// tsc only emits .ts (and imported .json) files. The policy and config are read
 // from disk at runtime, so copy them next to the compiled code.
 import { cpSync } from "node:fs";
 
-const assets = ["db/schema.sql", "policy/policy.md", "config/config.json"];
+const assets = ["policy/policy.md", "config/config.json"];
 for (const file of assets) {
   cpSync(`src/${file}`, `dist/${file}`);
 }

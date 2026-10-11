@@ -1,5 +1,5 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
-import { ZodError, type ZodType } from "zod";
+import { ZodError, type z, type ZodTypeAny } from "zod";
 
 // Every error response has the same shape: { error: string, details?: unknown }.
 
@@ -14,7 +14,8 @@ export class HttpError extends Error {
 }
 
 // Parses input with a zod schema; a failure becomes a 400 listing each problem.
-export function parseInput<T>(schema: ZodType<T>, input: unknown): T {
+// Returns the schema's OUTPUT type (after defaults and coercion are applied).
+export function parseInput<S extends ZodTypeAny>(schema: S, input: unknown): z.output<S> {
   const result = schema.safeParse(input);
   if (!result.success) throw validationError(result.error);
   return result.data;

@@ -1,13 +1,32 @@
+import { ObjectId, type ClientSession, type Db } from "mongodb";
 import type { AiReviewRecord } from "../ai/review";
+import { findAuditEvents } from "../audit/auditRepository";
 import type { CheckResult, ClaimInput, ExistingClaim } from "../validators";
-import type { DB } from "./db";
+import {
+  collections,
+  type ClaimDoc,
+  type ClaimStatus,
+  type DecisionAction,
+  type DecisionDoc,
+  type AiReviewDoc,
+} from "./collections";
+import { nextClaimNumber } from "./counters";
 
-// All SQL lives here. Functions map snake_case rows to camelCase objects and
-// contain no business rules; routes decide what is allowed.
+// All database access for claims and their records. Routes and services call
+// these functions and never use the driver directly. Functions return plain
+// API-shaped objects: claims are identified by `claimNumber` (exposed as `id`),
+// other records by their ObjectId as a string.
 
-export const CLAIM_STATUSES = ["submitted", "under_review", "approved", "rejected", "clarification_requested"] as const;
-export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
+export { CLAIM_STATUSES, DECISION_ACTIONS, type ClaimStatus, type DecisionAction } from "./collections";
 export const FINAL_STATUSES: ClaimStatus[] = ["approved", "rejected"];
+
+// Same text format the API has always returned ("YYYY-MM-DD HH:MM:SS", UTC),
+// so the client did not need to change when the database did.
+export function toApiTimestamp(date: Date): string {
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+// ---- claims ----------------------------------------------------------------
 
 export interface Claim extends ClaimInput {
   id: number;
@@ -16,67 +35,53 @@ export interface Claim extends ClaimInput {
   createdAt: string;
 }
 
-interface ClaimRow {
-  id: number;
-  claimant: string;
-  date: string;
-  category: string;
-  amount: number;
-  currency: string;
-  description: string;
-  receipt_available: number;
-  status: ClaimStatus;
-  final_category: string | null;
-  created_at: string;
-}
-
-const toClaim = (r: ClaimRow): Claim => ({
-  id: r.id,
-  claimant: r.claimant,
-  date: r.date,
-  category: r.category,
-  amount: r.amount,
-  currency: r.currency,
-  description: r.description,
-  receiptAvailable: r.receipt_available === 1,
-  status: r.status,
-  finalCategory: r.final_category,
-  createdAt: r.created_at,
+const toClaim = (d: ClaimDoc): Claim => ({
+  id: d.claimNumber,
+  claimant: d.claimant,
+  date: d.date,
+  category: d.category,
+  amount: d.amount,
+  currency: d.currency,
+  description: d.description,
+  receiptAvailable: d.receiptAvailable,
+  status: d.status,
+  finalCategory: d.finalCategory,
+  createdAt: toApiTimestamp(d.createdAt),
 });
 
-const parseJson = <T>(value: string | null, fallback: T): T => (value ? (JSON.parse(value) as T) : fallback);
-
-// ---- claims ----------------------------------------------------------------
-
-export function insertClaim(db: DB, c: ClaimInput): number {
-  const info = db
-    .prepare(
-      `INSERT INTO claims (claimant, date, category, amount, currency, description, receipt_available)
-       VALUES (@claimant, @date, @category, @amount, @currency, @description, @receipt)`,
-    )
-    .run({ ...c, receipt: c.receiptAvailable ? 1 : 0 });
-  return Number(info.lastInsertRowid);
+export async function insertClaim(db: Db, c: ClaimInput, session: ClientSession): Promise<number> {
+  const claimNumber = await nextClaimNumber(db, session);
+  await collections(db).claims.insertOne(
+    { ...c, claimNumber, status: "submitted", finalCategory: null, createdAt: new Date() },
+    { session },
+  );
+  return claimNumber;
 }
 
-export function getClaim(db: DB, id: number): Claim | undefined {
-  const row = db.prepare("SELECT * FROM claims WHERE id = ?").get(id) as ClaimRow | undefined;
-  return row && toClaim(row);
+export function countClaims(db: Db): Promise<number> {
+  return collections(db).claims.countDocuments();
 }
 
-export function updateClaimStatus(db: DB, id: number, status: ClaimStatus): void {
-  db.prepare("UPDATE claims SET status = ? WHERE id = ?").run(status, id);
+export async function getClaim(db: Db, id: number, session?: ClientSession): Promise<Claim | undefined> {
+  const doc = await collections(db).claims.findOne({ claimNumber: id }, { session });
+  return doc ? toClaim(doc) : undefined;
 }
 
-export function updateFinalCategory(db: DB, id: number, category: string): void {
-  db.prepare("UPDATE claims SET final_category = ? WHERE id = ?").run(category, id);
+export async function updateClaimStatus(db: Db, id: number, status: ClaimStatus, session: ClientSession): Promise<void> {
+  await collections(db).claims.updateOne({ claimNumber: id }, { $set: { status } }, { session });
 }
 
-// Candidates for duplicate detection: same claimant (case-insensitive) and date.
-export function findSameDayClaims(db: DB, claimant: string, date: string, excludeId?: number): ExistingClaim[] {
-  const rows = db
-    .prepare("SELECT * FROM claims WHERE lower(trim(claimant)) = lower(trim(?)) AND date = ? AND id != ?")
-    .all(claimant, date, excludeId ?? -1) as ClaimRow[];
-  return rows.map(toClaim);
+export async function updateFinalCategory(db: Db, id: number, category: string, session: ClientSession): Promise<void> {
+  await collections(db).claims.updateOne({ claimNumber: id }, { $set: { finalCategory: category } }, { session });
+}
+
+// Candidates for duplicate detection: same claimant (case-insensitive, via a
+// collation) and same date.
+export async function findSameDayClaims(db: Db, claimant: string, date: string, session: ClientSession): Promise<ExistingClaim[]> {
+  const docs = await collections(db)
+    .claims.find({ claimant: claimant.trim(), date }, { session, collation: { locale: "en", strength: 2 } })
+    .toArray();
+  return docs.map(toClaim);
 }
 
 export interface ClaimSummary extends Claim {
@@ -84,178 +89,147 @@ export interface ClaimSummary extends Claim {
   latestAi: { status: string; verdict: string | null; category: string | null; uncertain: boolean | null } | null;
 }
 
-export function listClaims(db: DB, status?: ClaimStatus): ClaimSummary[] {
-  const rows = db
-    .prepare(
-      `SELECT c.*,
-         (SELECT count(*) FROM validation_results v WHERE v.claim_id = c.id AND v.severity = 'error')   AS v_error,
-         (SELECT count(*) FROM validation_results v WHERE v.claim_id = c.id AND v.severity = 'warning') AS v_warning,
-         (SELECT count(*) FROM validation_results v WHERE v.claim_id = c.id AND v.severity = 'info')    AS v_info,
-         a.status AS ai_status, a.verdict AS ai_verdict, a.category AS ai_category, a.uncertain AS ai_uncertain
-       FROM claims c
-       LEFT JOIN ai_reviews a ON a.id = (SELECT max(id) FROM ai_reviews WHERE claim_id = c.id)
-       WHERE (@status IS NULL OR c.status = @status)
-       ORDER BY c.id DESC`,
-    )
-    .all({ status: status ?? null }) as (ClaimRow & {
-    v_error: number;
-    v_warning: number;
-    v_info: number;
-    ai_status: string | null;
-    ai_verdict: string | null;
-    ai_category: string | null;
-    ai_uncertain: number | null;
-  })[];
+export interface ClaimPage {
+  items: ClaimSummary[];
+  page: number;
+  limit: number;
+  total: number; // claims matching the filter, across all pages
+  totalPages: number;
+}
 
-  return rows.map((r) => ({
-    ...toClaim(r),
-    validationCounts: { error: r.v_error, warning: r.v_warning, info: r.v_info },
-    latestAi: r.ai_status
-      ? {
-          status: r.ai_status,
-          verdict: r.ai_verdict,
-          category: r.ai_category,
-          uncertain: r.ai_uncertain === null ? null : r.ai_uncertain === 1,
-        }
-      : null,
-  }));
+// One page of claims, newest first. claimNumber breaks ties between claims
+// created in the same millisecond, so the order (and therefore which claim is
+// on which page) is always the same. skip/limit is simple and fine at this
+// scale; very deep pages would want cursor pagination instead (see README).
+// A page past the end simply has no items; the totals are still correct.
+export async function listClaimsPage(
+  db: Db,
+  { status, page, limit }: { status?: ClaimStatus; page: number; limit: number },
+): Promise<ClaimPage> {
+  const filter = status ? { status } : {};
+  const { claims } = collections(db);
+  const [docs, total] = await Promise.all([
+    claims
+      .find(filter)
+      .sort({ createdAt: -1, claimNumber: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .toArray(),
+    claims.countDocuments(filter),
+  ]);
+  return { items: await summarize(db, docs.map(toClaim)), page, limit, total, totalPages: Math.ceil(total / limit) };
+}
+
+// Adds validation counts and the latest AI result to a set of claims (one
+// page) using two queries in total, not one per claim.
+async function summarize(db: Db, claims: Claim[]): Promise<ClaimSummary[]> {
+  if (claims.length === 0) return [];
+  const numbers = claims.map((c) => c.id);
+  const { validationResults, aiReviews } = collections(db);
+
+  const counts = await validationResults
+    .aggregate<{ _id: { claimNumber: number; severity: CheckResult["severity"] }; n: number }>([
+      { $match: { claimNumber: { $in: numbers } } },
+      { $group: { _id: { claimNumber: "$claimNumber", severity: "$severity" }, n: { $sum: 1 } } },
+    ])
+    .toArray();
+
+  const latest = await aiReviews
+    .aggregate<{ _id: number; status: string; verdict: string | null; category: string | null; uncertain: boolean | null }>([
+      { $match: { claimNumber: { $in: numbers } } },
+      { $sort: { createdAt: -1, _id: -1 } },
+      {
+        $group: {
+          _id: "$claimNumber",
+          status: { $first: "$status" },
+          verdict: { $first: "$verdict" },
+          category: { $first: "$category" },
+          uncertain: { $first: "$uncertain" },
+        },
+      },
+    ])
+    .toArray();
+  const latestByClaim = new Map(latest.map(({ _id, ...ai }) => [_id, ai]));
+
+  return claims.map((c) => {
+    const validationCounts = { error: 0, warning: 0, info: 0 };
+    for (const row of counts) if (row._id.claimNumber === c.id) validationCounts[row._id.severity] = row.n;
+    return { ...c, validationCounts, latestAi: latestByClaim.get(c.id) ?? null };
+  });
 }
 
 // Claims that count towards totals: everything except rejected claims, using
 // the reviewer's category override when there is one.
-export function listClaimsForTotals(db: DB): Pick<ClaimInput, "claimant" | "category" | "amount" | "currency">[] {
-  return db
-    .prepare(
-      `SELECT claimant, coalesce(final_category, category) AS category, amount, currency
-       FROM claims WHERE status != 'rejected'`,
-    )
-    .all() as Pick<ClaimInput, "claimant" | "category" | "amount" | "currency">[];
+export async function listClaimsForTotals(db: Db): Promise<Pick<ClaimInput, "claimant" | "category" | "amount" | "currency">[]> {
+  const docs = await collections(db).claims.find({ status: { $ne: "rejected" } }).toArray();
+  return docs.map((d) => ({ claimant: d.claimant, category: d.finalCategory ?? d.category, amount: d.amount, currency: d.currency }));
 }
 
 // ---- validation results ----------------------------------------------------
 
 export interface StoredCheckResult extends CheckResult {
-  id: number;
+  id: string;
   createdAt: string;
 }
 
-export function insertValidationResults(db: DB, claimId: number, results: CheckResult[]): void {
-  const stmt = db.prepare(
-    "INSERT INTO validation_results (claim_id, check_name, severity, message, details_json) VALUES (?, ?, ?, ?, ?)",
+export async function insertValidationResults(db: Db, claimNumber: number, results: CheckResult[], session: ClientSession): Promise<void> {
+  if (results.length === 0) return;
+  const createdAt = new Date();
+  await collections(db).validationResults.insertMany(
+    results.map((r) => ({ claimNumber, checkName: r.checkName, severity: r.severity, message: r.message, details: r.details ?? null, createdAt })),
+    { session },
   );
-  for (const r of results) {
-    stmt.run(claimId, r.checkName, r.severity, r.message, r.details ? JSON.stringify(r.details) : null);
-  }
 }
 
-export function listValidationResults(db: DB, claimId: number): StoredCheckResult[] {
-  const rows = db
-    .prepare("SELECT * FROM validation_results WHERE claim_id = ? ORDER BY id")
-    .all(claimId) as {
-    id: number;
-    check_name: string;
-    severity: CheckResult["severity"];
-    message: string;
-    details_json: string | null;
-    created_at: string;
-  }[];
-  return rows.map((r) => ({
-    id: r.id,
-    checkName: r.check_name,
-    severity: r.severity,
-    message: r.message,
-    details: parseJson(r.details_json, undefined),
-    createdAt: r.created_at,
+// Oldest first, i.e. in the order the checks produced them.
+export async function listValidationResults(db: Db, claimNumber: number, session?: ClientSession): Promise<StoredCheckResult[]> {
+  const docs = await collections(db).validationResults.find({ claimNumber }, { session }).sort({ createdAt: 1, _id: 1 }).toArray();
+  return docs.map((d) => ({
+    id: d._id.toHexString(),
+    checkName: d.checkName,
+    severity: d.severity,
+    message: d.message,
+    ...(d.details && { details: d.details }),
+    createdAt: toApiTimestamp(d.createdAt),
   }));
 }
 
 // ---- AI reviews ------------------------------------------------------------
 
 export interface StoredAiReview extends Omit<AiReviewRecord, "retrievedSectionIds"> {
-  id: number;
+  id: string;
   claimId: number;
   createdAt: string;
 }
 
-interface AiReviewRow {
-  id: number;
-  claim_id: number;
-  status: AiReviewRecord["status"];
-  category: string | null;
-  confidence: number | null;
-  uncertain: number | null;
-  verdict: AiReviewRecord["verdict"];
-  explanation: string | null;
-  cited_sections_json: string | null;
-  questions_json: string | null;
-  model: string;
-  prompt_version: string;
-  latency_ms: number;
-  error: string | null;
-  created_at: string;
-}
-
-const toAiReview = (r: AiReviewRow): StoredAiReview => ({
-  id: r.id,
-  claimId: r.claim_id,
-  status: r.status,
-  category: r.category,
-  confidence: r.confidence,
-  uncertain: r.uncertain === null ? null : r.uncertain === 1,
-  verdict: r.verdict,
-  explanation: r.explanation,
-  citedSections: parseJson(r.cited_sections_json, []),
-  questions: parseJson(r.questions_json, []),
-  model: r.model,
-  promptVersion: r.prompt_version,
-  latencyMs: r.latency_ms,
-  error: r.error,
-  createdAt: r.created_at,
+const toAiReview = ({ _id, claimNumber, createdAt, ...rest }: AiReviewDoc & { _id: ObjectId }): StoredAiReview => ({
+  ...rest,
+  id: _id.toHexString(),
+  claimId: claimNumber,
+  createdAt: toApiTimestamp(createdAt),
 });
 
-// Always a new row: earlier AI runs are history and are never overwritten.
-export function insertAiReview(db: DB, claimId: number, r: AiReviewRecord): number {
-  const info = db
-    .prepare(
-      `INSERT INTO ai_reviews (claim_id, status, category, confidence, uncertain, verdict, explanation,
-         cited_sections_json, questions_json, model, prompt_version, latency_ms, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      claimId,
-      r.status,
-      r.category,
-      r.confidence,
-      r.uncertain === null ? null : r.uncertain ? 1 : 0,
-      r.verdict,
-      r.explanation,
-      JSON.stringify(r.citedSections),
-      JSON.stringify(r.questions),
-      r.model,
-      r.promptVersion,
-      r.latencyMs,
-      r.error,
-    );
-  return Number(info.lastInsertRowid);
+// Always a new document: earlier AI runs are history and are never overwritten.
+export async function insertAiReview(db: Db, claimNumber: number, r: AiReviewRecord, session: ClientSession): Promise<string> {
+  const { retrievedSectionIds: _retrieved, ...record } = r; // kept in the audit event, not here
+  const result = await collections(db).aiReviews.insertOne({ ...record, claimNumber, createdAt: new Date() }, { session });
+  return result.insertedId.toHexString();
 }
 
-export function getAiReview(db: DB, id: number): StoredAiReview | undefined {
-  const row = db.prepare("SELECT * FROM ai_reviews WHERE id = ?").get(id) as AiReviewRow | undefined;
-  return row && toAiReview(row);
+export async function getAiReview(db: Db, id: string): Promise<StoredAiReview | undefined> {
+  const doc = await collections(db).aiReviews.findOne({ _id: new ObjectId(id) });
+  return doc ? toAiReview(doc) : undefined;
 }
 
-export function listAiReviews(db: DB, claimId: number): StoredAiReview[] {
-  const rows = db.prepare("SELECT * FROM ai_reviews WHERE claim_id = ? ORDER BY id DESC").all(claimId) as AiReviewRow[];
-  return rows.map(toAiReview);
+export async function listAiReviews(db: Db, claimNumber: number): Promise<StoredAiReview[]> {
+  const docs = await collections(db).aiReviews.find({ claimNumber }).sort({ createdAt: -1, _id: -1 }).toArray();
+  return docs.map(toAiReview);
 }
 
 // ---- decisions -------------------------------------------------------------
 
-export const DECISION_ACTIONS = ["approve", "reject", "request_clarification", "override_category"] as const;
-export type DecisionAction = (typeof DECISION_ACTIONS)[number];
-
 export interface Decision {
-  id: number;
+  id: string;
   claimId: number;
   reviewer: string;
   action: DecisionAction;
@@ -264,38 +238,32 @@ export interface Decision {
   createdAt: string;
 }
 
-export function insertDecision(db: DB, d: Omit<Decision, "id" | "createdAt">): number {
-  const info = db
-    .prepare("INSERT INTO decisions (claim_id, reviewer, action, reason, override_category) VALUES (?, ?, ?, ?, ?)")
-    .run(d.claimId, d.reviewer, d.action, d.reason, d.overrideCategory);
-  return Number(info.lastInsertRowid);
+export async function insertDecision(
+  db: Db,
+  d: Omit<DecisionDoc, "_id" | "createdAt">,
+  session: ClientSession,
+): Promise<string> {
+  const result = await collections(db).decisions.insertOne({ ...d, createdAt: new Date() }, { session });
+  return result.insertedId.toHexString();
 }
 
-export function listDecisions(db: DB, claimId: number): Decision[] {
-  const rows = db.prepare("SELECT * FROM decisions WHERE claim_id = ? ORDER BY id DESC").all(claimId) as {
-    id: number;
-    claim_id: number;
-    reviewer: string;
-    action: DecisionAction;
-    reason: string | null;
-    override_category: string | null;
-    created_at: string;
-  }[];
-  return rows.map((r) => ({
-    id: r.id,
-    claimId: r.claim_id,
-    reviewer: r.reviewer,
-    action: r.action,
-    reason: r.reason,
-    overrideCategory: r.override_category,
-    createdAt: r.created_at,
+export async function listDecisions(db: Db, claimNumber: number): Promise<Decision[]> {
+  const docs = await collections(db).decisions.find({ claimNumber }).sort({ createdAt: -1, _id: -1 }).toArray();
+  return docs.map((d) => ({
+    id: d._id.toHexString(),
+    claimId: d.claimNumber,
+    reviewer: d.reviewer,
+    action: d.action,
+    reason: d.reason,
+    overrideCategory: d.overrideCategory,
+    createdAt: toApiTimestamp(d.createdAt),
   }));
 }
 
 // ---- audit events (read side; writes go through audit/audit.ts) ------------
 
 export interface StoredAuditEvent {
-  id: number;
+  id: string;
   claimId: number | null;
   actor: string;
   action: string;
@@ -305,25 +273,16 @@ export interface StoredAuditEvent {
   createdAt: string;
 }
 
-export function listAuditEvents(db: DB, claimId: number): StoredAuditEvent[] {
-  const rows = db.prepare("SELECT * FROM audit_events WHERE claim_id = ? ORDER BY id DESC").all(claimId) as {
-    id: number;
-    claim_id: number | null;
-    actor: string;
-    action: string;
-    before_json: string | null;
-    after_json: string | null;
-    reason: string | null;
-    created_at: string;
-  }[];
-  return rows.map((r) => ({
-    id: r.id,
-    claimId: r.claim_id,
-    actor: r.actor,
-    action: r.action,
-    before: parseJson(r.before_json, null),
-    after: parseJson(r.after_json, null),
-    reason: r.reason,
-    createdAt: r.created_at,
+export async function listAuditEvents(db: Db, claimNumber: number): Promise<StoredAuditEvent[]> {
+  const docs = await findAuditEvents(db, claimNumber);
+  return docs.map((d) => ({
+    id: d._id!.toHexString(),
+    claimId: d.claimNumber,
+    actor: d.actor,
+    action: d.action,
+    before: d.before,
+    after: d.after,
+    reason: d.reason,
+    createdAt: toApiTimestamp(d.createdAt),
   }));
 }

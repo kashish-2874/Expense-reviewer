@@ -1,6 +1,12 @@
+# Never send secrets, local databases or build output into the image.
 **/node_modules
 **/dist
-**/data
 **/.env
+**/.env.*
+!**/.env.example
+**/data
 **/*.db
+**/*.db-*
+coverage
 docs
+.git

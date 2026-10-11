@@ -1,4 +1,5 @@
 // Shapes returned by the server API (see server/src/db/repository.ts).
+// Claims are identified by their claim number; their sub-records by ObjectId strings.
 
 export type ClaimStatus = "submitted" | "under_review" | "approved" | "rejected" | "clarification_requested";
 export type Severity = "info" | "warning" | "error";
@@ -27,8 +28,28 @@ export interface ClaimSummary extends Claim {
   latestAi: { status: string; verdict: Verdict | null; category: string | null; uncertain: boolean | null } | null;
 }
 
+// GET /api/claims
+export interface ClaimPage {
+  items: ClaimSummary[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+// POST /api/claims (public): only a receipt, never the claim's flags or AI output.
+export interface ClaimReceipt {
+  claimNumber: number;
+  status: ClaimStatus;
+}
+
+export interface User {
+  username: string;
+  role: "admin";
+}
+
 export interface ValidationResult {
-  id: number;
+  id: string; // MongoDB ObjectId
   checkName: string;
   severity: Severity;
   message: string;
@@ -44,7 +65,7 @@ export interface Citation {
 }
 
 export interface AiReview {
-  id: number;
+  id: string; // MongoDB ObjectId
   status: "ok" | "unavailable" | "invalid_output";
   category: string | null;
   confidence: number | null;
@@ -61,7 +82,7 @@ export interface AiReview {
 }
 
 export interface Decision {
-  id: number;
+  id: string; // MongoDB ObjectId
   reviewer: string;
   action: DecisionAction;
   reason: string | null;
@@ -70,7 +91,7 @@ export interface Decision {
 }
 
 export interface AuditEvent {
-  id: number;
+  id: string; // MongoDB ObjectId
   actor: string;
   action: string;
   before: Record<string, unknown> | null;

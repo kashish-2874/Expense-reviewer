@@ -1,12 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
+import { reviewerOnly } from "../auth/middleware";
 import { createClaim } from "../claims/createClaim";
 import {
   CLAIM_STATUSES,
-  getClaim,
   listAiReviews,
   listAuditEvents,
-  listClaims,
+  listClaimsPage,
   listDecisions,
   listValidationResults,
 } from "../db/repository";
@@ -26,33 +26,46 @@ const createClaimSchema = z.object({
   receiptAvailable: z.boolean(),
 });
 
-const listQuerySchema = z.object({ status: z.enum(CLAIM_STATUSES).optional() });
+// Query strings arrive as text, so numbers are coerced ("2" -> 2) and then
+// checked: "abc", "1.5", 0 and anything over the cap are all 400s.
+export const MAX_PAGE_SIZE = 50;
+const listQuerySchema = z.object({
+  status: z.enum(CLAIM_STATUSES).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(10),
+});
 
-export function claimsRouter({ db, config, today }: AppDeps): Router {
+export function claimsRouter({ store, config, today, auth }: AppDeps): Router {
   const router = Router();
+  const { db } = store;
+  const reviewer = reviewerOnly(auth.jwtSecret);
 
-  router.post("/", (req, res) => {
+  // PUBLIC: anyone can submit a claim. The response is only a receipt (number
+  // and status) so the public endpoint cannot be used to read claim data,
+  // validation flags or AI output.
+  router.post("/", async (req, res) => {
     const input = parseInput(createClaimSchema, req.body);
-    const id = createClaim(db, config, input, today());
-    req.log.info({ claimId: id }, "Claim created");
-    res.status(201).json({ ...getClaim(db, id), validationResults: listValidationResults(db, id) });
+    const claimNumber = await createClaim(store, config, input, today());
+    req.log.info({ claimId: claimNumber }, "Claim created");
+    res.status(201).json({ claimNumber, status: "submitted" });
   });
 
-  router.get("/", (req, res) => {
-    const { status } = parseInput(listQuerySchema, req.query);
-    res.json(listClaims(db, status));
+  // Everything below is the reviewer area.
+  router.get("/", ...reviewer, async (req, res) => {
+    // Response: { items, page, limit, total, totalPages }
+    res.json(await listClaimsPage(db, parseInput(listQuerySchema, req.query)));
   });
 
-  router.get("/:id", (req, res) => {
+  router.get("/:id", ...reviewer, async (req, res) => {
     const id = parseClaimId(req.params.id);
-    const claim = requireClaim(db, id);
-    res.json({
-      ...claim,
-      validationResults: listValidationResults(db, id),
-      aiReviews: listAiReviews(db, id), // newest first
-      decisions: listDecisions(db, id), // newest first
-      auditEvents: listAuditEvents(db, id), // newest first
-    });
+    const claim = await requireClaim(store, id);
+    const [validationResults, aiReviews, decisions, auditEvents] = await Promise.all([
+      listValidationResults(db, id),
+      listAiReviews(db, id), // newest first
+      listDecisions(db, id), // newest first
+      listAuditEvents(db, id), // newest first
+    ]);
+    res.json({ ...claim, validationResults, aiReviews, decisions, auditEvents });
   });
 
   return router;

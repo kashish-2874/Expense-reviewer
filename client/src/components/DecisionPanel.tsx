@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../api";
+import { useCurrentUser } from "../auth";
 import type { AppConfig, ClaimDetail, DecisionAction } from "../types";
 
 // The reviewer's actions. Choosing an action opens a short form; reject,
 // clarification and override need a reason (the server enforces the same rules).
+// The reviewer is whoever is logged in; the server takes it from the session.
 
 const ACTIONS: { action: DecisionAction; label: string; className: string }[] = [
   { action: "approve", label: "Approve", className: "btn-approve" },
@@ -15,11 +17,11 @@ const ACTIONS: { action: DecisionAction; label: string; className: string }[] = 
 interface Props {
   claim: ClaimDetail;
   config: AppConfig;
-  reviewer: string;
   onDone: () => void;
 }
 
-export function DecisionPanel({ claim, config, reviewer, onDone }: Props) {
+export function DecisionPanel({ claim, config, onDone }: Props) {
+  const user = useCurrentUser();
   const [action, setAction] = useState<DecisionAction>();
   const [reason, setReason] = useState("");
   const [category, setCategory] = useState("");
@@ -49,7 +51,6 @@ export function DecisionPanel({ claim, config, reviewer, onDone }: Props) {
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!action) return;
-    if (!reviewer.trim()) return setError("Enter your reviewer name above first.");
     if (reasonRequired && !reason.trim()) return setError("Please give a reason.");
     if (action === "override_category" && !category) return setError("Choose the new category.");
 
@@ -57,7 +58,6 @@ export function DecisionPanel({ claim, config, reviewer, onDone }: Props) {
     setError(undefined);
     try {
       await api.decide(claim.id, {
-        reviewer: reviewer.trim(),
         action,
         reason: reason.trim() || undefined,
         overrideCategory: action === "override_category" ? category : undefined,
@@ -75,6 +75,9 @@ export function DecisionPanel({ claim, config, reviewer, onDone }: Props) {
 
   return (
     <div className="decision-panel">
+      <p className="muted small">
+        Deciding as <strong>{user.username}</strong>
+      </p>
       <div className="row wrap">
         {ACTIONS.map((a) => (
           <button

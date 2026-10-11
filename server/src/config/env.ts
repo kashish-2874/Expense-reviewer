@@ -7,7 +7,14 @@ import { z } from "zod";
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3001),
-  DB_PATH: z.string().min(1).default("data/expense-review.db"),
+  // Must point at a replica set (Atlas, or a local one): transactions need it.
+  MONGODB_URI: z.string().min(1, "MONGODB_URI is required (see .env.example)"),
+  MONGODB_DB: z.string().min(1).default("expense_review"),
+  // Checked at startup by auth/config.ts (required in production).
+  JWT_SECRET: z.string().optional(),
+  // The admin account is created from these if it does not exist yet.
+  ADMIN_USERNAME: z.string().trim().optional(),
+  ADMIN_PASSWORD: z.string().optional(),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   // Optional: without a key the app uses a clearly labelled mock AI so it still demos.
   ANTHROPIC_API_KEY: z.string().optional(),

@@ -1,7 +1,8 @@
 import { createClaim } from "../claims/createClaim";
 import { addDays } from "../clock";
 import type { AppConfig } from "../config/config";
-import type { DB } from "../db/db";
+import type { Store } from "../db/mongo";
+import { countClaims } from "../db/repository";
 import type { ClaimInput } from "../validators";
 
 // Realistic demo claims. Each one exercises a specific path through the
@@ -71,6 +72,19 @@ export function demoClaims(today: string): DemoClaim[] {
   ];
 }
 
-export function seedDemoClaims(db: DB, config: AppConfig, today: string): { id: number; scenario: string }[] {
-  return demoClaims(today).map(({ scenario, claim }) => ({ id: createClaim(db, config, claim, today), scenario }));
+// One at a time, in order, so claim numbers match the list above and the
+// duplicate scenarios see the claims they duplicate.
+export async function seedDemoClaims(store: Store, config: AppConfig, today: string): Promise<{ id: number; scenario: string }[]> {
+  const seeded: { id: number; scenario: string }[] = [];
+  for (const { scenario, claim } of demoClaims(today)) {
+    seeded.push({ id: await createClaim(store, config, claim, today), scenario });
+  }
+  return seeded;
+}
+
+// Used at server startup: seed only an empty database, never add demo data on
+// top of real claims. Returns how many claims were seeded (0 = skipped).
+export async function seedIfEmpty(store: Store, config: AppConfig, today: string): Promise<number> {
+  if ((await countClaims(store.db)) > 0) return 0;
+  return (await seedDemoClaims(store, config, today)).length;
 }

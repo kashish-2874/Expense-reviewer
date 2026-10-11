@@ -1,19 +1,22 @@
 import { Router } from "express";
+import { reviewerOnly } from "../auth/middleware";
 import { listClaimsForTotals } from "../db/repository";
 import { calculateTotals } from "../validators";
 import type { AppDeps } from "./shared";
 
-// Read-only endpoints that are not about a single claim.
-export function metaRouter({ db, config, aiClient }: AppDeps): Router {
+// Read-only endpoints that are not about a single claim. /health and /config
+// are public; /totals is for reviewers.
+export function metaRouter({ store, config, aiClient, auth }: AppDeps): Router {
   const router = Router();
 
-  // Rejected claims are excluded; reviewer category overrides are applied.
-  router.get("/totals", (_req, res) => {
-    res.json({ ...calculateTotals(listClaimsForTotals(db), config), excludes: ["rejected"] });
+  // Reviewer area. Rejected claims are excluded; category overrides are applied.
+  router.get("/totals", ...reviewerOnly(auth.jwtSecret), async (_req, res) => {
+    res.json({ ...calculateTotals(await listClaimsForTotals(store.db), config), excludes: ["rejected"] });
   });
 
-  // The parts of config the UI needs (form options, limits), so the client never
-  // keeps its own copy that could drift from config.json.
+  // PUBLIC, because the public claim form needs it. The parts of config the UI
+  // needs (form options, limits), so the client never keeps its own copy that
+  // could drift from config.json. Nothing secret here.
   router.get("/config", (_req, res) => {
     res.json({
       baseCurrency: config.baseCurrency,
@@ -23,8 +26,8 @@ export function metaRouter({ db, config, aiClient }: AppDeps): Router {
     });
   });
 
-  router.get("/health", (_req, res) => {
-    db.prepare("SELECT 1").get(); // throws (-> 500) if the DB is unusable
+  router.get("/health", async (_req, res) => {
+    await store.db.command({ ping: 1 }); // throws (-> 500) if the database is unreachable
     res.json({ status: "ok", db: "ok", ai: { mode: aiClient.isMock ? "mock" : "anthropic", model: aiClient.model } });
   });
 

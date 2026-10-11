@@ -8,12 +8,6 @@ export function formatMoney(amount: number, currency: string): string {
   }
 }
 
-// SQLite stores datetime('now') as UTC "YYYY-MM-DD HH:MM:SS" without a zone.
-export function formatTimestamp(sqliteUtc: string): string {
-  const d = new Date(`${sqliteUtc.replace(" ", "T")}Z`);
-  return Number.isNaN(d.getTime()) ? sqliteUtc : d.toLocaleString();
-}
-
 export const STATUS_LABELS: Record<ClaimStatus, string> = {
   submitted: "Submitted",
   under_review: "Under review",

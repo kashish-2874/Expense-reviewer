@@ -5,9 +5,10 @@ import type { AppConfig } from "../types";
 import { Card, Empty, ErrorBox, Loading } from "./ui";
 
 // Totals per claimant and per category, computed by the server in INR.
+// Reviewer area. Loads fresh each time the claims page is opened.
 
-export function TotalsPanel({ config, refreshKey }: { config: AppConfig; refreshKey?: unknown }) {
-  const totals = useAsync(() => api.totals(), [refreshKey]);
+export function TotalsPanel({ config }: { config: AppConfig }) {
+  const totals = useAsync(() => api.totals(), []);
 
   return (
     <Card title="Totals">

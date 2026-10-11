@@ -2,19 +2,24 @@ import { z } from "zod";
 import type { AiClient } from "../ai/client";
 import type { PolicySection } from "../ai/policy";
 import type { AppConfig } from "../config/config";
-import type { DB } from "../db/db";
+import type { Store } from "../db/mongo";
 import { getClaim, type Claim } from "../db/repository";
 import { HttpError, parseInput } from "../errors";
+import type { ClientSession } from "mongodb";
 
-// Everything the routes need, passed in explicitly so tests can swap the DB,
-// the AI client and the clock.
+// Everything the routes need, passed in explicitly so tests can swap the
+// database, the AI client and the clock.
 export interface AppDeps {
-  db: DB;
+  store: Store;
   config: AppConfig;
   policy: PolicySection[];
   aiClient: AiClient;
   aiTimeoutMs: number;
   today: () => string; // YYYY-MM-DD in local time
+  auth: {
+    jwtSecret: string;
+    secureCookies: boolean; // true in production (HTTPS only)
+  };
 }
 
 const idSchema = z.coerce.number().int().positive();
@@ -23,11 +28,8 @@ export function parseClaimId(raw: unknown): number {
   return parseInput(idSchema, raw);
 }
 
-export function requireClaim(db: DB, id: number): Claim {
-  const claim = getClaim(db, id);
+export async function requireClaim(store: Store, id: number, session?: ClientSession): Promise<Claim> {
+  const claim = await getClaim(store.db, id, session);
   if (!claim) throw new HttpError(404, `Claim ${id} not found`);
   return claim;
 }
-
-// Reviewer names are free text (no auth in scope), but must not be blank.
-export const reviewerName = z.string().trim().min(1, "Reviewer name is required").max(100);

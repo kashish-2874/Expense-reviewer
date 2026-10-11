@@ -1,22 +1,64 @@
-import { useState } from "react";
 import { api } from "../api";
 import { categoryLabel, formatMoney, STATUS_LABELS } from "../format";
-import { navigate, useAsync } from "../hooks";
-import type { AppConfig, ClaimStatus, ClaimSummary } from "../types";
+import { useAsync } from "../hooks";
+import { navigate, useLocation } from "../router";
+import type { AppConfig, ClaimPage, ClaimStatus, ClaimSummary } from "../types";
 import { Card, Empty, ErrorBox, Loading, StatusBadge, UncertainBadge } from "./ui";
 
-// The reviewer's queue: every claim with its status, AI flags and validation
-// counts, filterable by status. Clicking a row opens the claim.
+// The reviewer's queue, one page at a time. Page, page size and status filter
+// live in the URL (/claims?page=2&limit=25&status=approved), so refresh, the
+// back button and shared links all show the same page.
+
+const PAGE_SIZES = [10, 25, 50];
+const DEFAULT_LIMIT = 10;
+
+interface ListQuery {
+  page: number;
+  limit: number;
+  status: ClaimStatus | "";
+}
+
+// Reads the URL leniently: anything odd falls back to a default rather than
+// showing an error for a hand-edited link.
+function readQuery(search: string): ListQuery {
+  const params = new URLSearchParams(search);
+  const page = Number(params.get("page"));
+  const limit = Number(params.get("limit"));
+  const status = params.get("status") ?? "";
+  return {
+    page: Number.isInteger(page) && page >= 1 ? page : 1,
+    limit: PAGE_SIZES.includes(limit) ? limit : DEFAULT_LIMIT,
+    status: status in STATUS_LABELS ? (status as ClaimStatus) : "",
+  };
+}
+
+// Writes only non-default values, so the plain list stays at "/claims".
+function writeQuery({ page, limit, status }: ListQuery): string {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (limit !== DEFAULT_LIMIT) params.set("limit", String(limit));
+  if (page !== 1) params.set("page", String(page));
+  const qs = params.toString();
+  return qs ? `/claims?${qs}` : "/claims";
+}
 
 export function ClaimList({ config }: { config: AppConfig }) {
-  const [status, setStatus] = useState<ClaimStatus | "">("");
-  const claims = useAsync(() => api.listClaims(status || undefined), [status]);
+  const { search } = useLocation();
+  const query = readQuery(search);
+  const claims = useAsync(
+    () => api.listClaims({ page: query.page, limit: query.limit, status: query.status || undefined }),
+    [query.page, query.limit, query.status],
+  );
 
-  const filter = (
-    <div className="row">
+  // Changing the filter or page size goes back to page 1: page 3 of the old
+  // result may not exist in the new one.
+  const update = (changes: Partial<ListQuery>) => navigate(writeQuery({ ...query, page: 1, ...changes }));
+
+  const controls = (
+    <div className="row wrap">
       <label className="inline-label">
         Status
-        <select value={status} onChange={(e) => setStatus(e.target.value as ClaimStatus | "")}>
+        <select value={query.status} onChange={(e) => update({ status: e.target.value as ClaimStatus | "" })}>
           <option value="">All</option>
           {Object.entries(STATUS_LABELS).map(([value, label]) => (
             <option key={value} value={value}>
@@ -32,45 +74,89 @@ export function ClaimList({ config }: { config: AppConfig }) {
   );
 
   return (
-    <Card title="Claims" actions={filter}>
+    <Card title="Claims" actions={controls}>
       {claims.error ? (
         <ErrorBox error={claims.error} onRetry={claims.reload} />
       ) : !claims.data ? (
         <Loading />
-      ) : claims.data.length === 0 ? (
+      ) : claims.data.total === 0 ? (
+        <Empty>{query.status ? `No claims with status "${STATUS_LABELS[query.status]}".` : "No claims yet."}</Empty>
+      ) : claims.data.items.length === 0 ? (
+        // A bookmarked or hand-typed page that no longer exists.
         <Empty>
-          {status ? `No claims with status "${STATUS_LABELS[status]}".` : "No claims yet."}{" "}
-          <a href="#/new">Submit a claim</a>
+          There is no page {query.page}.{" "}
+          <button type="button" className="btn btn-small" onClick={() => update({ page: claims.data!.totalPages })}>
+            Go to the last page
+          </button>
         </Empty>
       ) : (
-        <div className="table-wrap">
-          <table className="claims-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Claimant</th>
-                <th>Date</th>
-                <th>Category</th>
-                <th className="num">Amount</th>
-                <th>Status</th>
-                <th>AI</th>
-                <th>Flags</th>
-              </tr>
-            </thead>
-            <tbody>
-              {claims.data.map((c) => (
-                <ClaimRow key={c.id} claim={c} config={config} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div className={`table-wrap ${claims.loading ? "is-loading" : ""}`}>
+            <table className="claims-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Claimant</th>
+                  <th>Date</th>
+                  <th>Category</th>
+                  <th className="num">Amount</th>
+                  <th>Status</th>
+                  <th>AI</th>
+                  <th>Flags</th>
+                </tr>
+              </thead>
+              <tbody>
+                {claims.data.items.map((c) => (
+                  <ClaimRow key={c.id} claim={c} config={config} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pager data={claims.data} onPage={(page) => update({ page })} onLimit={(limit) => update({ limit })} />
+        </>
       )}
     </Card>
   );
 }
 
+function Pager({ data, onPage, onLimit }: { data: ClaimPage; onPage: (page: number) => void; onLimit: (limit: number) => void }) {
+  const first = (data.page - 1) * data.limit + 1;
+  const last = first + data.items.length - 1;
+  return (
+    <nav className="pager" aria-label="Pagination">
+      <span className="muted small">
+        Showing {first}–{last} of {data.total} claim{data.total === 1 ? "" : "s"}
+      </span>
+      <div className="row">
+        <button type="button" className="btn btn-small" disabled={data.page <= 1} onClick={() => onPage(data.page - 1)}>
+          ← Previous
+        </button>
+        <span className="small">
+          Page {data.page} of {Math.max(data.totalPages, 1)}
+        </span>
+        <button
+          type="button"
+          className="btn btn-small"
+          disabled={data.page >= data.totalPages}
+          onClick={() => onPage(data.page + 1)}
+        >
+          Next →
+        </button>
+      </div>
+      <label className="inline-label small">
+        Per page
+        <select value={data.limit} onChange={(e) => onLimit(Number(e.target.value))}>
+          {PAGE_SIZES.map((size) => (
+            <option key={size}>{size}</option>
+          ))}
+        </select>
+      </label>
+    </nav>
+  );
+}
+
 function ClaimRow({ claim: c, config }: { claim: ClaimSummary; config: AppConfig }) {
-  const open = () => navigate(`#/claims/${c.id}`);
+  const open = () => navigate(`/claims/${c.id}`);
   return (
     <tr className="clickable" onClick={open} onKeyDown={(e) => e.key === "Enter" && open()} tabIndex={0}>
       <td>{c.id}</td>

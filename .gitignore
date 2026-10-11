@@ -1,8 +1,15 @@
 node_modules/
 dist/
+coverage/
+
+# Secrets: real settings live only in .env (see server/.env.example).
 .env
+.env.*
+!.env.example
+
+# Local database files. The app now uses MongoDB, but keep these ignored so an
+# old local SQLite file (server/data/) can never be committed by accident.
 *.db
 *.db-wal
 *.db-shm
 server/data/
-coverage/

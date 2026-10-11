@@ -116,7 +116,7 @@ tr.clickable:hover { background: var(--bg); }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; }
 @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 .field { border: 0; margin: 0; padding: 0; min-width: 0; }
-.field label, .decision-form label, .reviewer-field { display: grid; gap: 0.25rem; }
+.field label, .decision-form label { display: grid; gap: 0.25rem; }
 .field-label { font-weight: 600; font-size: 0.88rem; padding: 0; }
 input, select, textarea {
   font: inherit; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); width: 100%;
@@ -129,7 +129,6 @@ input[type="radio"] { width: auto; }
 .radio { display: inline-flex !important; gap: 0.35rem; align-items: center; font-weight: normal; }
 .inline-label { display: inline-flex; gap: 0.5rem; align-items: center; font-size: 0.88rem; }
 .inline-label select { width: auto; }
-.reviewer-field { max-width: 320px; margin-bottom: 0.9rem; }
 .decision-form { margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
 
 /* ---- detail ---- */
@@ -160,3 +159,13 @@ input[type="radio"] { width: auto; }
 .timeline-head { display: flex; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
 .timeline-reason { font-style: italic; }
 details summary { cursor: pointer; color: var(--muted); }
+
+/* ---- header, login, pagination, confirmation ---- */
+.topbar nav { flex-wrap: wrap; justify-content: flex-end; }
+.header-user { color: var(--muted); padding: 0 0.25rem; }
+.login-page { max-width: 380px; margin: 2rem auto; }
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.9rem; }
+.table-wrap.is-loading { opacity: 0.55; transition: opacity 0.15s; } /* keeps the old page visible while the next loads */
+.confirmation { display: grid; gap: 0.5rem; justify-items: start; }
+.confirmation p { margin: 0; }
+.confirmation-number { font-size: 1.5rem; font-weight: 700; }

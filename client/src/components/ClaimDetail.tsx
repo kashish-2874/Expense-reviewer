@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { api } from "../api";
 import { categoryLabel, formatMoney } from "../format";
-import { useAsync, useReviewerName } from "../hooks";
+import { useAsync } from "../hooks";
+import { Link } from "../router";
 import type { AppConfig, ClaimDetail as Detail } from "../types";
 import { AiFinding } from "./AiFinding";
 import { DecisionPanel } from "./DecisionPanel";
@@ -11,23 +12,17 @@ import { Card, Empty, ErrorBox, Loading, SeverityBadge, StatusBadge } from "./ui
 // One claim, everything a reviewer needs: the data, the deterministic flags,
 // the AI's advice, the decision buttons and the full history.
 
-export function ClaimDetail({ id, config, onChanged }: { id: number; config: AppConfig; onChanged: () => void }) {
+export function ClaimDetail({ id, config }: { id: number; config: AppConfig }) {
   const detail = useAsync(() => api.getClaim(id), [id]);
-  const [reviewer, setReviewer] = useReviewerName();
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string>();
-
-  const refresh = () => {
-    detail.reload();
-    onChanged();
-  };
 
   async function runReview() {
     setReviewing(true);
     setReviewError(undefined);
     try {
-      await api.runReview(id, reviewer.trim());
-      refresh();
+      await api.runReview(id);
+      detail.reload();
     } catch (err) {
       setReviewError(err instanceof Error ? err.message : "AI review failed");
     } finally {
@@ -43,9 +38,9 @@ export function ClaimDetail({ id, config, onChanged }: { id: number; config: App
 
   return (
     <div className="detail">
-      <a href="#/" className="back">
+      <Link to="/claims" className="back">
         ← All claims
-      </a>
+      </Link>
 
       <Card title={`Claim #${claim.id}`} actions={<StatusBadge status={claim.status} />}>
         <ClaimFacts claim={claim} config={config} />
@@ -68,15 +63,11 @@ export function ClaimDetail({ id, config, onChanged }: { id: number; config: App
       </Card>
 
       <Card title="Decision">
-        <label className="reviewer-field">
-          <span className="field-label">Reviewer name</span>
-          <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="Your name" maxLength={100} />
-        </label>
-        <DecisionPanel claim={claim} config={config} reviewer={reviewer} onDone={refresh} />
+        <DecisionPanel claim={claim} config={config} onDone={detail.reload} />
       </Card>
 
       <Card title="History">
-        <HistoryTimeline events={claim.auditEvents} config={config} />
+        <HistoryTimeline events={claim.auditEvents} config={config} aiReviews={claim.aiReviews} />
       </Card>
     </div>
   );
